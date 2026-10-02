@@ -9,6 +9,7 @@
 import argparse
 import json
 import sys
+import tempfile
 import time
 import urllib.request
 from collections import defaultdict
@@ -74,7 +75,7 @@ def main():
     bars_of = {}
     t0 = time.time()
     done = 0
-    cache = DATA / "_kline_cache.json"
+    cache = Path(tempfile.gettempdir()) / "sentiment_kline_cache.json"
     if cache.exists():
         bars_of = json.loads(cache.read_text(encoding="utf-8"))
         print("用日线缓存 %d 只" % len(bars_of))
