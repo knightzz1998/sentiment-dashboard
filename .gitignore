@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+_kline_cache.json
+_dash_*.png
+_*.txt
+_s*.txt
+.venv/
