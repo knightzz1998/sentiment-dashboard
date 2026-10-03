@@ -98,6 +98,160 @@ def fetch_sina(codes, batch=700, pause=0.25):
     return out
 
 
+# ─────────────────── 东财涨停池 / 个股日线（用于明细与观察池） ───────────────────
+EM_UT = "7eea3edcaed734bea9cbfc24409ed989"
+
+
+def fetch_zt_pool(date_str):
+    """东财涨停池（date_str 形如 20260930）。⚠️ 必须带 date 参数，否则返回空。"""
+    if not date_str:
+        return []
+    url = ("https://push2ex.eastmoney.com/getTopicZTPool?ut=" + EM_UT +
+           "&dpt=wz.ztzt&Pageindex=0&pagesize=300&sort=fbt:asc&date=" + date_str)
+    req = urllib.request.Request(url, headers={"User-Agent": UA,
+                                              "Referer": "https://quote.eastmoney.com/"})
+    for attempt in range(3):
+        try:
+            d = json.loads(urllib.request.urlopen(req, timeout=25).read().decode("utf-8", "ignore"))
+            return (d.get("data") or {}).get("pool") or []
+        except Exception:
+            time.sleep(1.2 + attempt)
+    return []
+
+
+def fetch_kline(code, datalen=70):
+    """新浪日线（用于算 MA60 位置）"""
+    url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+           "CN_MarketData.getKLineData?symbol=" + sina_symbol(code) +
+           "&scale=240&ma=no&datalen=" + str(datalen))
+    req = urllib.request.Request(url, headers={"User-Agent": UA,
+                                              "Referer": "https://finance.sina.com.cn"})
+    try:
+        return json.loads(urllib.request.urlopen(req, timeout=18).read().decode("utf-8", "ignore"))
+    except Exception:
+        return []
+
+
+def ma60_dev(code):
+    """收盘价相对 MA60 的偏离（%）；数据不足返回 None"""
+    bars = fetch_kline(code)
+    closes = [float(b["close"]) for b in bars if b.get("close")]
+    if len(closes) < 60:
+        return None
+    ma = sum(closes[-60:]) / 60.0
+    return (closes[-1] / ma - 1) * 100 if ma else None
+
+
+def board_type_of(row, q):
+    """板型判定（口径与《情绪周期与龙头实战》4.1 完全一致）"""
+    if not q or q["prev"] <= 0:
+        return "换手板"
+    lim = limit_of(row["c"], row.get("n", ""))
+    try:
+        ochg = (q["open"] / q["prev"] - 1) * 100
+        lchg = (q["low"] / q["prev"] - 1) * 100
+    except ZeroDivisionError:
+        return "换手板"
+    if ochg >= lim - 0.3:                       # 开盘即涨停
+        return "一字板" if lchg >= lim - 0.3 else "T字板"
+    if lchg > 0.5:
+        return "强势换手板"                      # 全天都在红盘，一气拉到涨停
+    if lchg > -3.0:
+        return "普通换手板"
+    return "弱势/反包板"                         # 先绿后红，V 型拉板
+
+
+def build_detail(rows, quotes, daily, date_str):
+    """当日明细：连板梯队 / 板型 / 题材热度 / 封板质量 / 观察池 / 赚钱效应"""
+    d = {"date": date_str, "ladder": {}, "ladder_names": {}, "boards": {},
+         "themes": [], "seal_top": [], "watch": [], "n_pool": len(rows),
+         "prev_lu_ret": None, "prev_lu_win": None, "prev_lu_n": 0}
+
+    # ① 连板梯队（几进几）
+    for r in rows:
+        k = min(int(r.get("lbc") or 1), 6)
+        d["ladder"][str(k)] = d["ladder"].get(str(k), 0) + 1
+        d["ladder_names"].setdefault(str(k), []).append(
+            {"code": r["c"], "name": r.get("n", ""), "hybk": r.get("hybk", "")})
+
+    # ② 板型分布
+    for r in rows:
+        bt = board_type_of(r, quotes.get(r["c"]))
+        d["boards"][bt] = d["boards"].get(bt, 0) + 1
+
+    # ③ 题材热度（按东财行业板块归集涨停家数）
+    th = defaultdict(int)
+    for r in rows:
+        hb = (r.get("hybk") or "其他").split("-")[0]
+        th[hb] += 1
+    d["themes"] = sorted([[k, v] for k, v in th.items()], key=lambda x: -x[1])[:12]
+
+    # ④ 封板质量榜（封成比 = 封单额 ÷ 成交额）
+    seal = []
+    for r in rows:
+        amt = r.get("amount") or 0
+        fund = r.get("fund") or 0
+        if amt <= 0:
+            continue
+        seal.append({"code": r["c"], "name": r.get("n", ""), "lbc": r.get("lbc") or 1,
+                     "ratio": round(fund / amt, 1), "fund": round(fund / 1e8, 2),
+                     "zbc": r.get("zbc") or 0, "hybk": r.get("hybk", "")})
+    d["seal_top"] = sorted(seal, key=lambda x: -x["ratio"])[:10]
+
+    # ⑤ 赚钱效应：昨日涨停股今日表现
+    prev_lu = set()
+    for rec in reversed(daily):
+        if rec["d"] < date_str and rec.get("lu"):
+            prev_lu = set(rec["lu"])
+            break
+    rets = []
+    for c in prev_lu:
+        q = quotes.get(c)
+        if not q or q["prev"] <= 0:
+            continue
+        rets.append((q["now"] / q["prev"] - 1) * 100)
+    if rets:
+        d["prev_lu_n"] = len(rets)
+        d["prev_lu_ret"] = round(sum(rets) / len(rets), 2)
+        d["prev_lu_win"] = round(sum(1 for x in rets if x > 0) / len(rets) * 100, 1)
+
+    # ⑥ 观察池：按《情绪周期与龙头实战》第 8 章检查表中可自动化的四条
+    theme_n = dict(d["themes"])
+    cands = []
+    for r in rows:
+        lbc = int(r.get("lbc") or 1)
+        zbc = int(r.get("zbc") or 0)
+        amt = r.get("amount") or 0
+        fund = r.get("fund") or 0
+        ratio = (fund / amt) if amt else 0
+        hb = (r.get("hybk") or "其他").split("-")[0]
+        cond = {
+            "连板数 ≤3": lbc <= 3,
+            "未开板（≤1 次）": zbc <= 1,
+            "封成比 >10": ratio > 10,
+            "同题材涨停 ≥3 家": theme_n.get(hb, 0) >= 3,
+        }
+        hit = sum(1 for v in cond.values() if v)
+        if hit >= 3:
+            cands.append({"code": r["c"], "name": r.get("n", ""), "lbc": lbc,
+                          "zbc": zbc, "ratio": round(ratio, 1),
+                          "fund": round(fund / 1e8, 2), "hybk": hb,
+                          "amount": round(amt / 1e8, 2), "cond": cond, "hit": hit})
+    cands.sort(key=lambda x: (-x["hit"], -x["ratio"]))
+    d["n_screen"] = len(cands)
+    # 只对候选（最多 12 只）补 MA60 位置，并把「位置」并入条件命中
+    for c in cands[:12]:
+        dev = ma60_dev(c["code"])
+        c["dev60"] = round(dev, 1) if dev is not None else None
+        c["pos_ok"] = bool(dev is not None and dev < 25)
+        c["cond"]["位置 &lt;MA60+25%"] = c["pos_ok"]
+        c["hit"] = sum(1 for v in c["cond"].values() if v)
+    # 位置合格的排前面（位置是第 8 章检查表里优先级最高的一条）
+    d["watch"] = sorted(cands[:12], key=lambda x: (not x["pos_ok"], -x["hit"], -x["ratio"]))
+    d["watch_pos_ok"] = sum(1 for x in d["watch"] if x["pos_ok"])
+    return d
+
+
 # ─────────────────────── 单日指标计算 ───────────────────────
 def day_stats(quotes, prev_lu):
     """quotes: {code: {...}}；prev_lu: 上一交易日的涨停代码集合"""
@@ -292,7 +446,7 @@ def do_update():
 
     prev_lu = set()
     for rec in reversed(daily):
-        if rec.get("lu"):
+        if rec["d"] < d and rec.get("lu"):        # 必须是「上一交易日」，排除当日自己
             prev_lu = set(rec["lu"])
             break
     st = day_stats(quotes, prev_lu)
@@ -301,11 +455,13 @@ def do_update():
            "lb2": st["lb2"], "lu": sorted(st["lu"]),
            "br": round((st["touch"] - st["sealed"]) / st["touch"], 4) if st["touch"] else 0.0,
            "eq": st["eq"]}
+    # 先剔除同日旧记录，否则回溯连板时会把当日自己也算一遍（导致高度 +1）
+    daily = [x for x in daily if x["d"] != d]
     h = 0
     for c in rec["lu"]:
         h = max(h, chain_height(c, daily))
     rec["lbh"] = h
-    daily = [x for x in daily if x["d"] != d] + [rec]
+    daily = daily + [rec]
     daily.sort(key=lambda x: x["d"])
     for x in daily[:-90]:
         x.pop("lu", None)
@@ -313,6 +469,22 @@ def do_update():
     HIST.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
     print("已更新 %s：涨停 %d / 跌停 %d / 连板 %d / 最高 %d 板 / 炸板率 %.1f%%"
           % (d, rec["up"], rec["dn"], rec["lb2"], rec["lbh"], rec["br"] * 100))
+
+    # —— 当日明细：连板梯队 / 板型 / 题材热度 / 封板质量 / 赚钱效应 / 观察池 ——
+    rows = fetch_zt_pool(d.replace("-", ""))
+    print("东财涨停池 %d 条" % len(rows))
+    if rows:
+        detail = build_detail(rows, quotes, daily, d)
+        (DATA / "today.json").write_text(json.dumps(detail, ensure_ascii=False), encoding="utf-8")
+        print("  连板梯队 %s" % detail["ladder"])
+        print("  板型分布 %s" % detail["boards"])
+        print("  题材 TOP5 %s" % detail["themes"][:5])
+        print("  观察池 %d 只" % len(detail["watch"]))
+        if detail["prev_lu_ret"] is not None:
+            print("  赚钱效应：昨日涨停股今日均值 %+.2f%%（上涨 %.1f%%，n=%d）"
+                  % (detail["prev_lu_ret"], detail["prev_lu_win"], detail["prev_lu_n"]))
+    else:
+        print("  涨停池为空，跳过明细（东财接口需要 date 参数，或该日无数据）")
 
 
 # ─────────────────────── 页面生成 ───────────────────────
@@ -427,6 +599,129 @@ def phase_color(p):
             "高潮": "#8e2b22", "退潮": "#128a6f", "震荡": "#8a6d3b"}.get(p, "#8b95a5")
 
 
+def render_detail(det):
+    """当日明细区块：赚钱效应 / 连板梯队 / 板型 / 题材热度 / 封板质量 / 观察池"""
+    if not det:
+        return ""
+    h = []
+    nm = {"1": "首板", "2": "2 连板", "3": "3 连板", "4": "4 连板",
+          "5": "5 连板", "6": "6 板及以上"}
+    # ── 赚钱效应 + 连板梯队 ──
+    pr = det.get("prev_lu_ret")
+    if pr is None:
+        hero, hc = "<div class='v flat'>—</div><div class='n'>无样本</div>", "#8b95a5"
+    else:
+        hc = "#f0544f" if pr > 0 else "#22a06b"
+        hero = ("<div class='v' style='color:%s'>%+.2f%%</div>"
+                "<div class='n'>上涨占比 %.1f%%　样本 %d 只</div>"
+                % (hc, pr, det["prev_lu_win"], det["prev_lu_n"]))
+    ladder = det.get("ladder", {})
+    lrows = []
+    tot = sum(ladder.values()) or 1
+    for k in sorted(ladder, key=lambda x: int(x)):
+        names = det.get("ladder_names", {}).get(k, [])[:3]
+        rep = "、".join("%s(%s)" % (x["name"], x["code"]) for x in names)
+        more = "等" if len(det.get("ladder_names", {}).get(k, [])) > 3 else ""
+        bar = int(ladder[k] / tot * 100)
+        lrows.append(
+            "<tr><td>%s</td><td class='num'>%d</td>"
+            "<td><div style='background:#232a36;border-radius:3px;height:8px'>"
+            "<div style='background:#c0392b;height:8px;border-radius:3px;width:%d%%'></div></div></td>"
+            "<td style='color:#8b95a5'>%s%s</td></tr>"
+            % (nm.get(k, k + " 板"), ladder[k], max(bar, 3), rep, more))
+    h.append(
+        "<div class='sec grid g3' style='align-items:start'>"
+        "<div class='card'><div class='k'>赚钱效应　昨日涨停股今日表现</div>%s"
+        "<div class='n' style='margin-top:8px;color:#6b7484'>"
+        "这是短线的核心温度计：昨天封板的票今天有没有溢价。为负说明接力在亏钱。</div></div>"
+        "<div class='card' style='grid-column:span 2'><h2 style='margin-bottom:8px'>连板梯队（几进几）</h2>"
+        "<table><tr><th style='width:90px'>层级</th><th class='num' style='width:60px'>家数</th>"
+        "<th style='width:26%%'>占比</th><th>代表个股</th></tr>%s</table></div></div>"
+        % (hero, "".join(lrows)))
+
+    # ── 板型 + 题材热度 ──
+    boards = det.get("boards", {})
+    bt_rows = "".join(
+        "<tr><td>%s</td><td class='num'>%d</td><td class='num'>%.0f%%</td></tr>"
+        % (k, v, v / max(sum(boards.values()), 1) * 100)
+        for k, v in sorted(boards.items(), key=lambda x: -x[1]))
+    th = det.get("themes", [])
+    mx = th[0][1] if th else 1
+    th_rows = "".join(
+        "<tr><td>%s</td><td class='num'>%d</td>"
+        "<td><div style='background:#232a36;border-radius:3px;height:8px'>"
+        "<div style='background:#e0a458;height:8px;border-radius:3px;width:%d%%'></div></div></td></tr>"
+        % (k, v, max(int(v / mx * 100), 4)) for k, v in th[:12])
+    h.append(
+        "<div class='sec grid' style='grid-template-columns:0.8fr 1.2fr'>"
+        "<div class='card'><h2 style='margin-bottom:8px'>涨停板型分布</h2>"
+        "<table><tr><th>板型</th><th class='num'>家数</th><th class='num'>占比</th></tr>%s</table>"
+        "<div class='n' style='margin-top:8px;color:#6b7484'>"
+        "一字板买不到；弱势/反包板在 20 日尺度上最差（见第 17 册 4.1）。</div></div>"
+        "<div class='card'><h2 style='margin-bottom:8px'>题材热度（按涨停家数归集）</h2>"
+        "<table><tr><th>行业 / 题材</th><th class='num' style='width:70px'>家数</th>"
+        "<th style='width:34%%'>热度</th></tr>%s</table>"
+        "<div class='n' style='margin-top:8px;color:#6b7484'>"
+        "家数最多的方向才可能成为主线；只有一天的只是「当日热点」。</div></div></div>"
+        % (bt_rows, th_rows))
+
+    # ── 封板质量榜 ──
+    seal = det.get("seal_top", [])
+    srows = "".join(
+        "<tr><td>%s</td><td>%s</td><td class='num'>%d</td>"
+        "<td class='num' style='color:#c0392b'>%.1f</td><td class='num'>%.2f</td>"
+        "<td class='num'>%d</td><td style='color:#8b95a5'>%s</td></tr>"
+        % (x["code"], x["name"], x["lbc"], x["ratio"], x["fund"], x["zbc"], x["hybk"])
+        for x in seal)
+    h.append(
+        "<div class='sec'><h2>封板质量榜（封成比 = 封单额 ÷ 成交额）</h2>"
+        "<div class='card'><table><tr><th>代码</th><th>名称</th><th class='num'>连板</th>"
+        "<th class='num'>封成比</th><th class='num'>封单(亿)</th><th class='num'>开板次数</th>"
+        "<th>行业</th></tr>%s</table>"
+        "<div class='n' style='margin-top:8px;color:#6b7484'>"
+        "封成比 &gt;10 且开板 0 次＝封得结实；封成比 &lt;3 或反复开板＝分歧大。"
+        "这是「当日强度」的描述，不能单独用来预测次日。</div></div></div>" % srows)
+
+    # ── 观察池 ──
+    watch = det.get("watch", [])
+    if watch:
+        wrows = []
+        for w in watch:
+            dev = w.get("dev60")
+            devs = ("%+.1f%%" % dev) if dev is not None else "—"
+            devc = "#f0544f" if (dev is not None and dev > 25) else "#e6e9ef"
+            hits = "".join(
+                "<span style='color:%s;margin-right:6px'>%s%s</span>"
+                % ("#22a06b" if v else "#6b7484", "✓" if v else "✗", k)
+                for k, v in w["cond"].items())
+            wrows.append(
+                "<tr><td>%s</td><td>%s</td><td class='num'>%d</td>"
+                "<td class='num'>%.1f</td><td class='num'>%.2f</td>"
+                "<td class='num' style='color:%s'>%s</td>"
+                "<td style='color:#8b95a5'>%s</td><td style='font-size:11.5px'>%s</td></tr>"
+                % (w["code"], w["name"], w["lbc"], w["ratio"], w["fund"],
+                   devc, devs, w["hybk"], hits))
+        stat_line = (
+            "当日涨停 <b>%d</b> 只 → 通过「板数≤3 / 未开板 / 同题材≥3 家」初筛 <b>%d</b> 只 → "
+            "其中<b style='color:#f0ad4e'>位置合格（MA60 偏离 &lt;+25%%）的只有 %d 只</b>。"
+            "位置是检查表里优先级最高的一条：偏离过大直接放弃，不论其他条件多好。"
+            % (det.get("n_pool", 0), det.get("n_screen", 0), det.get("watch_pos_ok", 0)))
+        h.append(
+            "<div class='sec'><h2>观察池（按第 17 册第 8 章检查表筛选）</h2>"
+            "<div class='card'><div style='font-size:12.5px;color:#c6cedb;margin-bottom:10px'>"
+            + stat_line + "</div>"
+            "<table><tr><th>代码</th><th>名称</th><th class='num'>板数</th>"
+            "<th class='num'>封成比</th><th class='num'>封单(亿)</th><th class='num'>MA60偏离</th>"
+            "<th>行业</th><th>条件命中</th></tr>" + "".join(wrows) + "</table>"
+            "<div class='warning' style='margin-top:12px;border-left:3px solid #f0ad4e;"
+            "background:#1d1a12;padding:11px 14px;border-radius:8px;font-size:12.5px;color:#d8c9a8'>"
+            "<b>这不是推荐，也不是买入信号。</b>它只是「符合几条已知规则」的筛选结果。"
+            "任何一条不满足，都应该放弃，而不是打折执行。<br>"
+            "历史统计显示：没有任何单一信号值得「看到就买」；28 种可量化战法里，"
+            "扣掉成本后只有 4 种毛超额为正，且幅度都在噪声级。</div></div></div>")
+    return "".join(h)
+
+
 def render_html(obj):
     daily = obj["daily"]
     emos = emo_series(daily)
@@ -437,6 +732,16 @@ def render_html(obj):
     d = last["d"]
     br = last["br"] * 100
     ratio = (last["ups"] / last["downs"]) if last["downs"] else last["ups"]
+
+    det = None
+    tp = DATA / "today.json"
+    if tp.exists():
+        try:
+            cand = json.loads(tp.read_text(encoding="utf-8"))
+            if cand.get("date") == last["d"]:
+                det = cand
+        except Exception:
+            det = None
 
     recs = list(reversed(daily[-20:]))
     rows = []
@@ -511,6 +816,8 @@ def render_html(obj):
     <div class="adv"><b style="color:{ecolor}">{esc(adv)}</b><br>
       <span style="color:#8b95a5">判定为「{esc(ph)}」阶段。完整规则见《情绪周期与龙头实战》第 1、2、7 章；
       八条下单检查表见第 8 章。</span></div></div>
+
+  {render_detail(det)}
 
   <div class="sec grid g3" style="align-items:start">
     <div class="card" style="grid-column:span 2">
