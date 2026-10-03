@@ -13,6 +13,7 @@
 import argparse
 import json
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -25,6 +26,7 @@ DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
 HIST = DATA / "sentiment.json"
 CODES = DATA / "codes.json"
+SWING = DATA / "swing.json"
 CACHE = Path(r"D:\Code\GS\ETF\data\sbl_qfq_bars_cache.json")   # 仅 --init 用
 WARM = 60
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -722,6 +724,128 @@ def render_detail(det):
     return "".join(h)
 
 
+def do_swing():
+    """调用波段选股器（腾讯/东财前复权）→ data/swing.json + data/stage1_log.json"""
+    script = ROOT / "swing_screen.py"
+    if not script.exists():
+        print("未找到 swing_screen.py，跳过波段选股")
+        return
+    try:
+        proc = subprocess.run([sys.executable, str(script)], cwd=str(ROOT),
+                              capture_output=True, text=True, timeout=1200, check=False)
+    except Exception as e:
+        print("波段选股运行失败：%s: %s" % (type(e).__name__, e))
+        return
+    out = (proc.stdout or "").strip()
+    if out:
+        for line in out.splitlines():
+            print("  [波段] " + line)
+    if proc.returncode != 0:
+        print("  [波段] 退出码 %s；stderr 末尾：%s"
+              % (proc.returncode, (proc.stderr or "")[-300:]))
+
+
+def render_swing():
+    """波段闸门 + 候选 + 阶段 1 进度（数据来自 swing_screen.py）"""
+    if not SWING.exists():
+        return ""
+    try:
+        s = json.loads(SWING.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not s or not s.get("date"):
+        return ""
+
+    go = bool(s.get("gate_open"))
+    gc = "#22a06b" if go else "#f0544f"
+    fun = s.get("funnel") or {}
+    funnel = " → ".join("%s <b>%s</b>" % (esc(k), format(v, ",")) for k, v in fun.items())
+
+    main = s.get("main") or []
+    rows = []
+    for c in main[:12]:
+        rows.append(
+            "<tr><td>%s</td><td>%s</td><td class='num'>%.2f</td>"
+            "<td class='num'>%+.2f%%</td><td class='num'>%.2f%%</td>"
+            "<td class='num'>%+.2f%%</td><td class='num'>%.2f</td>"
+            "<td class='num'>%d</td></tr>"
+            % (esc(c.get("code", "")), esc(c.get("name", "")), c.get("close", 0),
+               c.get("dev60", 0), c.get("disp", 0), c.get("buf", 0),
+               c.get("amt", 0), c.get("score", 0)))
+    if not rows:
+        rows.append("<tr><td colspan='8' style='color:#8b95a5'>"
+                    "今天没有通过八级条件的候选——这是正常结果，不是失败（漏斗 0.6% 本就很窄）</td></tr>")
+    more = ""
+    if len(main) > 12:
+        more = ("<div class='n' style='margin-top:6px;color:#6b7484'>另有 %d 只未列出，"
+                "完整清单见 data/swing.json</div>" % (len(main) - 12))
+
+    np_ = len(s.get("need_perm") or [])
+    nst = len(s.get("st") or [])
+
+    st = s.get("stage1") or {}
+    done, tgt = st.get("done", 0), st.get("target", 20)
+    pct = min(100.0, done / float(tgt) * 100) if tgt else 0
+    lrows = []
+    for r in reversed(st.get("rows") or []):
+        g = bool(r.get("gate"))
+        lrows.append(
+            "<tr><td>%s</td><td>%s</td><td class='num'>%s</td>"
+            "<td><span style='color:%s'>%s</span></td><td class='num'>%d</td></tr>"
+            % (esc(r.get("d", "")), esc(r.get("regime", "—")),
+               ("%+.2f%%" % r["chg20"]) if r.get("chg20") is not None else "—",
+               "#22a06b" if g else "#f0544f", "开放" if g else "关闭", r.get("n", 0)))
+
+    return f"""
+  <div class="sec"><h2>波段闸门与候选（第 19／20 册口径）</h2>
+    <div class="adv" style="border-left-color:{gc}">
+      <b style="color:{gc}">闸门：{'开放' if go else '关闭'}</b>
+      <span style="color:#c6cedb">　{esc(s.get('gate_reason', ''))}</span><br>
+      <span style="color:#8b95a5">筛选漏斗（八级硬条件）：{funnel}</span>
+    </div>
+  </div>
+
+  <div class="sec grid g3">
+    <div class="card"><div class="k">大盘环境（等权指数 20 日）</div>
+      <div class="v" style="color:{gc}">{esc(s.get('regime', '—'))}</div>
+      <div class="n">{'%+.2f%%' % s['chg20'] if s.get('chg20') is not None else '—'}</div></div>
+    <div class="card"><div class="k">主板候选（3 万可执行）</div>
+      <div class="v">{len(main)}</div><div class="n">只</div></div>
+    <div class="card"><div class="k">需权限 / 已剔除</div>
+      <div class="v" style="font-size:19px">{np_} / {nst}</div>
+      <div class="n">创业科创北交 / ST</div></div>
+  </div>
+
+  <div class="sec"><h2>候选清单（主板，按复合评分排序）</h2>
+    <div class="card">
+      <table><tr><th>代码</th><th>名称</th><th class="num">收盘</th>
+      <th class="num">高于MA60</th><th class="num">发散度</th><th class="num">MA20缓冲</th>
+      <th class="num">20日均额(亿)</th><th class="num">评分</th></tr>{''.join(rows)}</table>
+      {more}
+      <div class="n" style="margin-top:8px;color:#6b7484">
+      初始止损＝收盘 × 0.90（移动止损）；加仓参考位＝MA20。
+      <b style="color:#f0544f">候选≠推荐≠买入信号</b>：入场信号本身的超额只有 +0.01%，
+      真正的价值是「排除不该做的票」。开盘前还要核对第 19 册第 8 章的十项清单。</div>
+    </div>
+  </div>
+
+  <div class="sec"><h2>阶段 1 · 空跑记录（每日自动追加）</h2>
+    <div class="card">
+      <div style="font-size:13.5px;color:#c6cedb;margin-bottom:8px">
+        已完成 <b style="color:#3b82f6">{done}</b> / {tgt} 个交易日　·　
+        其中闸门开放 <b style="color:#22a06b">{st.get('open_days', 0)}</b> 天　·　
+        <span style="color:#8b95a5">记录满 20 天后，回看「闸门开过几天、那几天候选有哪些」</span></div>
+      <div style="height:6px;background:#232a36;border-radius:3px;overflow:hidden;margin-bottom:10px">
+        <div style="width:{pct:.1f}%;height:100%;background:#3b82f6"></div></div>
+      <table><tr><th>日期</th><th>大盘环境</th><th class="num">20日涨跌</th>
+      <th>闸门</th><th class="num">主板候选</th></tr>{''.join(lrows)}</table>
+      <div class="n" style="margin-top:8px;color:#6b7484">
+      同一交易日重复运行只覆盖、不重复计数（幂等）。数据文件 data/stage1_log.json。</div>
+    </div>
+  </div>
+"""
+
+
 def render_html(obj):
     daily = obj["daily"]
     emos = emo_series(daily)
@@ -817,6 +941,8 @@ def render_html(obj):
       <span style="color:#8b95a5">判定为「{esc(ph)}」阶段。完整规则见《情绪周期与龙头实战》第 1、2、7 章；
       八条下单检查表见第 8 章。</span></div></div>
 
+  {render_swing()}
+
   {render_detail(det)}
 
   <div class="sec grid g3" style="align-items:start">
@@ -869,6 +995,7 @@ def main():
         do_init()
     if not a.offline and not a.init:
         do_update()
+        do_swing()
     do_render()
 
 
