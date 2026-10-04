@@ -952,6 +952,58 @@ def render_regime():
         return ""
     ret, win, act, colk, note = st
     col = PANEL_COL[colk]
+
+    # ── 行动卡（该怎么做）──
+    sc = r.get("行动卡") or {}
+    if sc:
+        picks = "".join("<li>%s</li>" % esc(x) for x in sc.get("pick", []))
+        avoids = "".join("<li>%s</li>" % esc(x) for x in sc.get("avoid", []))
+        card = """
+    <div class="card" style="margin-top:12px;border-left:3px solid %s">
+      <div style="font-size:15px;font-weight:700;color:%s;margin-bottom:8px">该怎么做（行情 → 方法）</div>
+      <div style="font-size:14px;color:#e6e9ef;margin-bottom:12px">
+        <b>做：</b>%s</div>
+      <div style="display:grid;gap:14px;grid-template-columns:1.3fr 1fr">
+        <div>
+          <div class="k" style="margin-bottom:6px">选股 / 观察条件</div>
+          <ul style="margin:0;padding-left:20px;font-size:13px;color:#c6cedb;line-height:1.75">%s</ul>
+        </div>
+        <div>
+          <div class="k" style="margin-bottom:6px">仓位</div>
+          <div style="font-size:13.5px;color:#e6e9ef;margin-bottom:12px">%s</div>
+          <div class="k" style="margin-bottom:6px">不要做</div>
+          <ul style="margin:0;padding-left:20px;font-size:13px;color:#f0544f;opacity:.9;line-height:1.75">%s</ul>
+        </div>
+      </div>
+    </div>""" % (col, col, esc(sc.get("do", "")), picks, esc(sc.get("size", "")), avoids)
+    else:
+        card = ""
+
+    # ── 九宫格速查表 ──
+    quick = r.get("九宫格速查") or []
+    qrows = []
+    for x in quick:
+        c2 = PANEL_COL.get(x["色"], "#8b95a5")
+        mark = " ← 当前" if x["当前"] else ""
+        bg = "background:%s14;" % c2 if x["当前"] else ""
+        qrows.append(
+            "<tr style='%s'><td style='color:#e6e9ef'>%s<b>%s</b></td>"
+            "<td class='num' style='color:%s'>%+.2f%%</td>"
+            "<td class='num' style='color:%s'>%d%%</td>"
+            "<td style='color:%s;font-weight:600'>%s%s</td></tr>"
+            % (bg, "", esc(x["格"]), c2, x["后20日%"], c2, x["胜率%"], c2,
+               esc(x["动作"]), mark))
+    qtable = """
+    <div class="card" style="margin-top:12px">
+      <div style="font-size:14px;font-weight:700;color:#c6cedb;margin-bottom:8px">
+        九宫格速查 —— 9 种状态各自该怎么做</div>
+      <table><tr><th style="width:26%%">量价状态</th><th class="num" style="width:16%%">后 20 日</th>
+      <th class="num" style="width:14%%">胜率</th><th>动作</th></tr>%s</table>
+      <div style="color:#6b7484;font-size:11.5px;margin-top:8px">
+        「后 20 日」为该状态之后 20 个交易日的市场平均涨跌（样本 847 天，2023-01 ~ 2026-09）。
+        它是历史统计，不是对明天的预测。</div>
+    </div>""" % "".join(qrows) if qrows else ""
+
     return """
   <div class="sec"><h2>今天该不该做（量价四象限 · %s）</h2>
     <div class="card">
@@ -972,11 +1024,14 @@ def render_regime():
         <div style="flex:1;min-width:300px">%s</div>
         <div style="flex:1;min-width:300px">%s</div>
       </div>
-    </div></div>
+    </div>
+%s
+%s
+  </div>
 """ % (esc(r.get("日期", "")), col, esc(act), esc(r.get("量能档6", "")),
        r.get("量能变化%", 0), r.get("成交额亿", 0), r.get("前20日均亿", 0),
        esc(pd), r.get("等权20日涨跌%", 0), col, ret, col, win, esc(note),
-       svg_panel(v, pd), svg_amount(r.get("近20日") or []))
+       svg_panel(v, pd), svg_amount(r.get("近20日") or []), card, qtable)
 
 
 def render_html(obj):
@@ -1069,10 +1124,12 @@ def render_html(obj):
       <span><span class="sw" style="background:#22a06b"></span>跌停家数</span></div>
       {svg_bars(daily)}</div></div>
 
-  <div class="sec"><h2>今天该做什么</h2>
+  <div class="sec"><h2>情绪阶段对应的纪律（打板与持仓用）</h2>
     <div class="adv"><b style="color:{ecolor}">{esc(adv)}</b><br>
       <span style="color:#8b95a5">判定为「{esc(ph)}」阶段。完整规则见《情绪周期与龙头实战》第 1、2、7 章；
-      八条下单检查表见第 8 章。</span></div></div>
+      八条下单检查表见第 8 章。<br>
+      注：这一段是<b>情绪口径</b>（管打板与持仓）；页面顶部的「今天该不该做」是<b>量价口径</b>（管波段与是否开新仓），
+      两者独立，不要混用。</span></div></div>
 
   {render_swing()}
 
