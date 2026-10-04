@@ -846,6 +846,139 @@ def render_swing():
 """
 
 
+# ── 行情判断（量价四象限）──
+# 统计值来自 regime_map.py（847 个交易日，2023-01 ~ 2026-09-18）
+PANEL_STAT = {
+    ("放量", "价涨"): (3.23, 76, "最该做", "good", "量价齐升——全场最好的一格"),
+    ("放量", "价平"): (1.41, 62, "可以做", "good", "量在价先，资金已经进场"),
+    ("放量", "价跌"): (1.61, 47, "小心做", "warn", "放量下跌多为恐慌盘，等止跌"),
+    ("平量", "价涨"): (0.29, 53, "轻仓试", "warn", "力度不足，涨了也别重仓"),
+    ("平量", "价平"): (0.59, 40, "观望", "warn", "没有方向，不做比乱做好"),
+    ("平量", "价跌"): (2.53, 57, "可以低吸", "good", "缩量后的价跌，找超跌的"),
+    ("缩量", "价涨"): (-1.52, 47, "不做", "bad", "无量上涨接不住，多为假突破"),
+    ("缩量", "价平"): (-1.36, 36, "不做", "bad", "最差的一格，胜率只有 36%"),
+    ("缩量", "价跌"): (2.67, 62, "准备做", "go", "超跌反弹，但要等放量确认"),
+}
+PANEL_COL = {"good": "#22a06b", "go": "#3b82f6", "warn": "#d9a441", "bad": "#f0544f"}
+
+
+def do_regime():
+    """调用 regime.py：算量价四象限 → data/regime.json"""
+    try:
+        import importlib
+        import regime as R
+        importlib.reload(R)
+        R.main()
+    except Exception as ex:
+        print("  行情判断失败（不影响其他模块）：%s" % ex)
+
+
+def svg_panel(cur_v, cur_p, w=560, h=300):
+    """3×3 九宫格，高亮当前格"""
+    order = [("放量", ["价涨", "价平", "价跌"]),
+             ("平量", ["价涨", "价平", "价跌"]),
+             ("缩量", ["价涨", "价平", "价跌"])]
+    cw, ch, L, T = w / 3.0, (h - 40) / 3.0, 0, 30
+    out = ['<svg viewBox="0 0 %d %d" width="100%%" height="%d">' % (w, h, h)]
+    for j, lab in enumerate(["价涨", "价平", "价跌"]):
+        out.append('<text x="%.1f" y="18" font-size="11" fill="#8b95a5" text-anchor="middle">%s</text>'
+                   % (L + cw * j + cw / 2, lab))
+    for i, (v, plist) in enumerate(order):
+        for j, p in enumerate(plist):
+            ret, win, act, col, _ = PANEL_STAT[(v, p)]
+            x, y = L + cw * j, T + ch * i
+            cur = (v == cur_v and p == cur_p)
+            cc = PANEL_COL[col]
+            fill = cc + ("44" if cur else "18")
+            out.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="6" fill="%s" '
+                       'stroke="%s" stroke-width="%.1f"/>'
+                       % (x + 3, y + 3, cw - 6, ch - 6, fill, cc, 2.5 if cur else 1))
+            out.append('<text x="%.1f" y="%.1f" font-size="10.5" fill="#8b95a5">%s</text>'
+                       % (x + 10, y + 17, v + p))
+            out.append('<text x="%.1f" y="%.1f" font-size="14" font-weight="700" fill="%s" '
+                       'text-anchor="end">%+.2f%%</text>'
+                       % (x + cw - 8, y + 18, cc, ret))
+            out.append('<text x="%.1f" y="%.1f" font-size="11.5" font-weight="700" fill="%s">%s</text>'
+                       % (x + 10, y + 40, cc, act))
+            out.append('<text x="%.1f" y="%.1f" font-size="10" fill="#6b7484">胜率 %d%%</text>'
+                       % (x + 10, y + 56, win))
+            if cur:
+                out.append('<text x="%.1f" y="%.1f" font-size="10" font-weight="700" fill="%s">← 当前</text>'
+                           % (x + cw - 8, y + 56, cc))
+    out.append("</svg>")
+    return "".join(out)
+
+
+def svg_amount(rows, w=560, h=300):
+    """近 20 日沪深成交额柱状图"""
+    if not rows:
+        return ""
+    vals = [r["亿"] for r in rows]
+    mx = max(vals) * 1.12
+    avg = sum(vals) / len(vals)
+    L, R, T, B = 8, 8, 22, 34
+    pw, ph = w - L - R, h - T - B
+    bw = pw / len(vals)
+    out = ['<svg viewBox="0 0 %d %d" width="100%%" height="%d">' % (w, h, h)]
+    out.append('<text x="8" y="14" font-size="11" fill="#8b95a5">沪深合计成交额（亿元）· 虚线＝前 20 日均值</text>')
+    ya = T + ph - avg / mx * ph
+    out.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#3b82f6" stroke-width="1.4" '
+               'stroke-dasharray="5 3" opacity="0.7"/>' % (L, ya, L + pw, ya))
+    for i, r in enumerate(rows):
+        v = r["亿"]
+        x = L + bw * i
+        hh = v / mx * ph
+        col = "#f0544f" if v >= avg else "#5a6b80"
+        out.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="2" fill="%s" opacity="0.9"/>'
+                   % (x + bw * 0.15, T + ph - hh, bw * 0.7, hh, col))
+        if (i % 3 == 0 and i < len(rows) - 2) or i == len(rows) - 1:
+            out.append('<text x="%.1f" y="%d" font-size="9" fill="#6b7484" text-anchor="middle">%s</text>'
+                       % (x + bw / 2, h - 8, r["d"][5:]))
+    out.append("</svg>")
+    return "".join(out)
+
+
+def render_regime():
+    p = DATA / "regime.json"
+    if not p.exists():
+        return ""
+    try:
+        r = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    v, pd = r.get("量能档"), r.get("价格方向")
+    st = PANEL_STAT.get((v, pd))
+    if not st:
+        return ""
+    ret, win, act, colk, note = st
+    col = PANEL_COL[colk]
+    return """
+  <div class="sec"><h2>今天该不该做（量价四象限 · %s）</h2>
+    <div class="card">
+      <div class="hero">
+        <div>
+          <div class="k">当前动作</div>
+          <div class="emo" style="color:%s;font-size:44px">%s</div>
+        </div>
+        <div style="flex:1;min-width:280px;font-size:13.5px;color:#c6cedb">
+          <div>量能：<b style="color:#e6e9ef">%s</b>（%+.1f%%，成交额 %.0f 亿 / 前20日均 %.0f 亿）</div>
+          <div>价格：<b style="color:#e6e9ef">%s</b>（全市场等权近 20 日 %+.2f%%）</div>
+          <div style="margin-top:6px">历史统计：之后 20 个交易日 <b style="color:%s">%+.2f%%</b>　·　
+            胜率 <b style="color:%s">%d%%</b></div>
+          <div style="margin-top:6px;color:#8b95a5">%s</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:14px">
+        <div style="flex:1;min-width:300px">%s</div>
+        <div style="flex:1;min-width:300px">%s</div>
+      </div>
+    </div></div>
+""" % (esc(r.get("日期", "")), col, esc(act), esc(r.get("量能档6", "")),
+       r.get("量能变化%", 0), r.get("成交额亿", 0), r.get("前20日均亿", 0),
+       esc(pd), r.get("等权20日涨跌%", 0), col, ret, col, win, esc(note),
+       svg_panel(v, pd), svg_amount(r.get("近20日") or []))
+
+
 def render_html(obj):
     daily = obj["daily"]
     emos = emo_series(daily)
@@ -896,9 +1029,9 @@ def render_html(obj):
 <title>A 股情绪看板 · {esc(d)}</title><style>{CSS}</style></head><body>
 <div class="wrap">
   <h1>A 股情绪看板</h1>
-  <div class="sub">数据日期 <b style="color:#e6e9ef">{esc(d)}</b>　·　数据来源：新浪财经行情（日线快照）
-  　·　情绪值口径与《情绪周期与龙头实战》第 17 册一致　·　仅供参考，不构成投资建议</div>
-
+  <div class="sub">数据日期 <b style="color:#e6e9ef">{esc(d)}</b>　·　数据来源：新浪财经行情（日线快照）＋ 通达信（指数成交额）
+  　·　情绪值口径见《情绪周期与龙头实战》第 17 册，量价四象限见《什么行情用什么方法》　·　仅供参考，不构成投资建议</div>
+{render_regime()}
   <div class="sec"><div class="card">
     <div class="hero">
       <div>
@@ -996,6 +1129,7 @@ def main():
     if not a.offline and not a.init:
         do_update()
         do_swing()
+        do_regime()
     do_render()
 
 
