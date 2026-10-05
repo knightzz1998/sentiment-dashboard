@@ -958,6 +958,26 @@ def render_regime():
     if sc:
         picks = "".join("<li>%s</li>" % esc(x) for x in sc.get("pick", []))
         avoids = "".join("<li>%s</li>" % esc(x) for x in sc.get("avoid", []))
+        sn = sc.get("strat_n")
+        sl = sc.get("strat_list") or []
+        if sn is None:
+            strat_html = ""
+        elif sn == 0:
+            strat_html = """
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid #232a36">
+        <div class="k" style="margin-bottom:6px">这个行情下，实测正期望的策略</div>
+        <div style="font-size:13.5px;color:#f0544f;font-weight:600">
+          28 个策略里 <b>0 个</b> 是正期望 —— 不是「换个策略还能做」，而是<b>什么策略都别做</b>。</div>
+      </div>"""
+        else:
+            items = "".join("<li>%s</li>" % esc(x) for x in sl)
+            strat_html = """
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid #232a36">
+        <div class="k" style="margin-bottom:6px">
+          这个行情下，实测正期望的策略（28 个里 <b style="color:#22a06b">%d 个</b>）——
+          口径：105 万个信号，持有 20 个交易日</div>
+        <ul style="margin:0;padding-left:20px;font-size:12.5px;color:#c6cedb;line-height:1.8">%s</ul>
+      </div>""" % (sn, items)
         card = """
     <div class="card" style="margin-top:12px;border-left:3px solid %s">
       <div style="font-size:15px;font-weight:700;color:%s;margin-bottom:8px">该怎么做（行情 → 方法）</div>
@@ -975,7 +995,9 @@ def render_regime():
           <ul style="margin:0;padding-left:20px;font-size:13px;color:#f0544f;opacity:.9;line-height:1.75">%s</ul>
         </div>
       </div>
-    </div>""" % (col, col, esc(sc.get("do", "")), picks, esc(sc.get("size", "")), avoids)
+%s
+    </div>""" % (col, col, esc(sc.get("do", "")), picks, esc(sc.get("size", "")),
+                 avoids, strat_html)
     else:
         card = ""
 
