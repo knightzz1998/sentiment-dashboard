@@ -1056,6 +1056,141 @@ def render_regime():
        svg_panel(v, pd), svg_amount(r.get("近20日") or []), card, qtable)
 
 
+def do_best():
+    """调用 best_screen.py：最优策略信号（ETF·KDJ低位金叉）→ data/best.json"""
+    script = ROOT / "best_screen.py"
+    if not script.exists():
+        print("未找到 best_screen.py，跳过最优策略信号")
+        return
+    try:
+        proc = subprocess.run([sys.executable, str(script)], cwd=str(ROOT),
+                              capture_output=True, text=True, timeout=1200, check=False)
+    except Exception as e:
+        print("最优策略信号运行失败：%s: %s" % (type(e).__name__, e))
+        return
+    out = (proc.stdout or "").strip()
+    if out:
+        for line in out.splitlines():
+            print("  [最优] " + line)
+    if proc.returncode != 0:
+        print("  [最优] 退出码 %s；stderr 末尾：%s"
+              % (proc.returncode, (proc.stderr or "")[-300:]))
+
+
+def render_best():
+    """最优策略信号：闸门 + 今日信号 + 观察池 + 持仓监控"""
+    p = DATA / "best.json"
+    if not p.exists():
+        return ""
+    try:
+        r = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    d = esc(r.get("日期", ""))
+    op = r.get("闸门开放")
+    if op is None:
+        gcol, gtxt = "#8b95a5", "数据不足"
+    elif op:
+        gcol, gtxt = "#128a6f", "开放"
+    else:
+        gcol, gtxt = "#f0544f", "关闭"
+    sigs = r.get("今日信号") or []
+    sn = r.get("今日信号数") or len(sigs)
+    watch = r.get("观察池") or []
+    holds = r.get("持仓") or []
+    wn = r.get("观察池总数") or 0
+
+    h = ['<div class="sec"><h2>最优策略信号（ETF · KDJ 低位金叉 · 跌破 MA20 退出）</h2>']
+    h.append('<div class="card">')
+    # ── 闸门 ──
+    h.append('<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;'
+             'padding:12px 16px;border-radius:10px;background:#141821;'
+             'border-left:3px solid ' + gcol + ';margin-bottom:14px">')
+    h.append('<div><div class="k">今日闸门</div><div style="font-size:26px;font-weight:700;color:'
+             + gcol + '">' + gtxt + '</div></div>')
+    h.append('<div style="flex:1;min-width:260px;font-size:13px;color:#c6cedb">'
+             + esc(r.get("闸门说明", "")) + '</div>')
+    h.append('<div style="text-align:right"><div class="k">今日信号</div>'
+             '<div style="font-size:26px;font-weight:700;color:'
+             + ("#c0392b" if sigs else "#8b95a5") + '">' + str(sn) + '</div></div>')
+    h.append('</div>')
+
+    # ── 今日信号 ──
+    if sigs:
+        rows = "".join(
+            "<tr><td>%s</td><td>%s</td><td class='num'>%.3f</td><td class='num'>%.1f</td>"
+            "<td class='num'>%s</td><td class='num'>%s</td></tr>"
+            % (esc(x.get("代码", "")), esc(x.get("名称", "")), x.get("收盘", 0), x.get("K", 0),
+               ("%+.2f%%" % x["高于MA20%"]) if x.get("高于MA20%") is not None else "—",
+               ("%.2f 亿" % x["20日均额亿"]) if x.get("20日均额亿") else "—")
+            for x in sigs)
+        h.append('<div style="font-size:14px;font-weight:700;color:#c0392b;margin-bottom:8px">'
+                 '今日出现信号（' + str(sn) + " 只，下表列前 10 只）—— 符合条件则<b>次日开盘</b>买入，单笔 6,000 元</div>")
+        if not op:
+            h.append('<div style="padding:11px 14px;border-radius:8px;background:#1d1313;'
+                     'border-left:3px solid #f0544f;font-size:13px;color:#f0b6b3;margin-bottom:10px">'
+                     '<b>但今日闸门关闭 —— 这些信号今天一个都不做，只作为记录。</b>'
+                     '闸门与信号是<b>串联</b>的：先看闸门，闸门不开就没必要看信号。</div>')
+        h.append('<table><tr><th style="width:11%">代码</th><th style="width:20%">名称</th>'
+                 '<th class="num" style="width:11%">收盘</th><th class="num" style="width:9%">K 值</th>'
+                 '<th class="num" style="width:13%">高于 MA20</th>'
+                 '<th class="num" style="width:13%">20 日均额</th></tr>' + rows + '</table>')
+    else:
+        h.append('<div style="padding:11px 14px;border-radius:8px;background:#1d1a12;'
+                 'border-left:3px solid #d98a3c;font-size:13px;color:#d8c9a8">'
+                 '<b>今天没有出现「K 上穿 D 且 K &lt; 40」的信号。</b>'
+                 '没有信号就不买——这是这个策略的常态，不是异常。</div>')
+
+    # ── 观察池 ──
+    if watch:
+        rows = "".join(
+            "<tr><td>%s</td><td>%s</td><td class='num'>%.1f</td><td class='num'>%.1f</td>"
+            "<td class='num'>%s</td></tr>"
+            % (esc(x.get("代码", "")), esc(x.get("名称", "")), x.get("K", 0), x.get("D", 0),
+               ("%+.2f%%" % x["高于MA20%"]) if x.get("高于MA20%") is not None else "—")
+            for x in watch)
+        h.append('<div style="font-size:14px;font-weight:700;color:#c6cedb;margin:16px 0 8px">'
+                 '观察池：K &lt; 40 还没金叉（共 ' + str(wn) + ' 只，列 K 最低的 10 只）'
+                 '<span style="font-weight:400;color:#8b95a5;font-size:12px">'
+                 '—— K 越低越超卖，一旦 K 上穿 D 就是信号</span></div>')
+        h.append('<table><tr><th style="width:11%">代码</th><th style="width:24%">名称</th>'
+                 '<th class="num" style="width:12%">K 值</th><th class="num" style="width:12%">D 值</th>'
+                 '<th class="num" style="width:14%">高于 MA20</th></tr>' + rows + '</table>')
+
+    # ── 持仓监控 ──
+    if holds:
+        rows = "".join(
+            "<tr><td>%s</td><td>%s</td><td class='num'>%s</td><td class='num'>%.3f</td>"
+            "<td class='num %s'>%s</td><td class='num'>%.3f</td><td>%s</td></tr>"
+            % (esc(x.get("代码", "")), esc(x.get("名称", "")),
+               ("%.3f" % x["买价"]) if x.get("买价") else "—", x.get("现价", 0),
+               ("up" if (x.get("持有收益%") or 0) > 0 else "dn"),
+               ("%+.2f%%" % x["持有收益%"]) if x.get("持有收益%") is not None else "—",
+               x.get("MA20") or 0, esc(x.get("动作", "")))
+            for x in holds)
+        h.append('<div style="font-size:14px;font-weight:700;color:#c6cedb;margin:16px 0 8px">'
+                 '我的持仓（读 data/best_positions.json）</div>')
+        h.append('<table><tr><th style="width:11%">代码</th><th style="width:18%">名称</th>'
+                 '<th class="num" style="width:11%">买价</th><th class="num" style="width:11%">现价</th>'
+                 '<th class="num" style="width:12%">持有收益</th><th class="num" style="width:11%">MA20</th>'
+                 '<th>动作</th></tr>' + rows + '</table>')
+    else:
+        h.append('<div style="font-size:12.5px;color:#6b7484;margin:14px 0 0">'
+                 '持仓监控为空 —— 在 <code>data/best_positions.json</code> 里填入你的持仓，'
+                 '这里就会每天自动算「距 MA20」并提示是否该卖。</div>')
+
+    # ── 说明 ──
+    h.append('<div style="margin-top:16px;padding-top:12px;border-top:1px solid #232a36;'
+             'font-size:12px;color:#8b95a5;line-height:1.7">'
+             '策略：' + esc(r.get("口径", "")) + '<br>'
+             '<b style="color:#d8c9a8">这不是推荐，也不是买入信号。</b>'
+             '它是把一套已回测的规则每天自动跑一遍的结果；三条铁律不变——'
+             '<b>闸门不开不动手、没有信号就不买、跌破 MA20 就要走</b>。'
+             '</div>')
+    h.append('</div></div>')
+    return "".join(h)
+
+
 def render_html(obj):
     daily = obj["daily"]
     emos = emo_series(daily)
@@ -1109,6 +1244,7 @@ def render_html(obj):
   <div class="sub">数据日期 <b style="color:#e6e9ef">{esc(d)}</b>　·　数据来源：新浪财经行情（日线快照）＋ 通达信（指数成交额）
   　·　情绪值口径见《情绪周期与龙头实战》第 17 册，量价四象限见《什么行情用什么方法》　·　仅供参考，不构成投资建议</div>
 {render_regime()}
+{render_best()}
   <div class="sec"><div class="card">
     <div class="hero">
       <div>
@@ -1209,6 +1345,7 @@ def main():
         do_update()
         do_swing()
         do_regime()
+        do_best()
     do_render()
 
 
