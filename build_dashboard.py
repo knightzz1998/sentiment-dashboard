@@ -1191,6 +1191,167 @@ def render_best():
     return "".join(h)
 
 
+def do_dividend():
+    """调用 dividend_screen.py：攒股收息 / 蓝筹 → data/dividend.json"""
+    script = ROOT / "dividend_screen.py"
+    if not script.exists():
+        print("未找到 dividend_screen.py，跳过攒股收息模块")
+        return
+    try:
+        proc = subprocess.run([sys.executable, str(script)], cwd=str(ROOT),
+                              capture_output=True, text=True, timeout=1800, check=False)
+    except Exception as e:
+        print("攒股收息模块运行失败：%s: %s" % (type(e).__name__, e))
+        return
+    out = (proc.stdout or "").strip()
+    if out:
+        for line in out.splitlines():
+            print("  [收息] " + line)
+    if proc.returncode != 0:
+        print("  [收息] 退出码 %s；stderr 末尾：%s"
+              % (proc.returncode, (proc.stderr or "")[-300:]))
+
+
+def _dn(v, f="%.2f", dash="—"):
+    """数字格式化；None → 破折号"""
+    if v is None:
+        return dash
+    try:
+        return f % float(v)
+    except (TypeError, ValueError):
+        return dash
+
+
+DIV_ACT_COLOR = {"可分批建仓": "#22a06b", "等站上 MA60": "#d98a3c",
+                 "先等，别接刀": "#8b95a5", "—": "#8b95a5"}
+DIV_ROWS_SHOWN = 15
+
+
+def render_dividend():
+    """攒股收息 / 值得买的蓝筹股（长期底仓清单）"""
+    p = DATA / "dividend.json"
+    if not p.exists():
+        return ""
+    try:
+        r = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    divs = r.get("收息榜") or []
+    blues = r.get("蓝筹榜") or []
+    if not divs and not blues:
+        return ""
+    d = esc(r.get("日期", ""))
+    mkt = r.get("全市场") or {}
+    th = r.get("阈值") or {}
+
+    h = ['<div class="sec"><h2>攒股收息 / 值得买的蓝筹股（长期底仓清单 · '
+         + d + '）</h2><div class="card">']
+    h.append('<div style="padding:11px 14px;border-radius:8px;background:#141821;'
+             'border-left:3px solid #3b82f6;font-size:13px;color:#c6cedb;margin-bottom:12px">'
+             '这一块跟上面的<b>短线闸门无关</b>：上面管「今天做不做短线」，这里管「长期底仓买什么」。'
+             '两个榜都不是推荐，是把「<b>分红 + 估值 + 位置</b>」三条公开规则跑出来的清单。</div>')
+
+    # ── 全市场背景 ──
+    h.append('<div class="grid g3" style="margin-bottom:14px">')
+    h.append('<div class="card" style="background:#141821"><div class="k">全市场股票数</div>'
+             '<div class="v">' + str(mkt.get("股票数", "—")) + '</div>'
+             '<div class="n">已剔除 ST / 退市 / 无行情</div></div>')
+    h.append('<div class="card" style="background:#141821"><div class="k">股息率 ≥ 3%</div>'
+             '<div class="v" style="color:#e0a458">' + str(mkt.get("股息率东财≥3%", "—")) + '</div>'
+             '<div class="n">东财口径（近 12 个月已实施现金分红 ÷ 现价）</div></div>')
+    h.append('<div class="card" style="background:#141821"><div class="k">股息率 ≥ 5%</div>'
+             '<div class="v" style="color:#e0a458">' + str(mkt.get("股息率东财≥5%", "—")) + '</div>'
+             '<div class="n">高股息不是越多越好，要看能不能持续</div></div>')
+    h.append('</div>')
+
+    # ── 榜 A：攒股收息 ──
+    if divs:
+        rows = []
+        for x in divs[:DIV_ROWS_SHOWN]:
+            act = x.get("动作") or "—"
+            rows.append(
+                "<tr><td>%s</td><td>%s</td><td style='color:#8b95a5'>%s</td>"
+                "<td class='num'>%s</td>"
+                "<td class='num' style='color:#e0a458;font-weight:700'>%s</td>"
+                "<td class='num' style='color:#8b95a5'>%s</td>"
+                "<td class='num'>%s</td><td class='num'>%s</td><td class='num'>%s</td>"
+                "<td class='num'>%s</td><td class='num'>%s</td>"
+                "<td style='color:%s'>%s</td></tr>"
+                % (esc(x.get("代码", "")), esc(x.get("名称", "")), esc(x.get("行业", "")),
+                   _dn(x.get("现价")),
+                   _dn(x.get("股息率取低"), "%.2f%%"),
+                   _dn(x.get("股息率东财"), "%.2f%%"),
+                   _dn(x.get("每万元年分红"), "%.0f"),
+                   _dn(x.get("PE"), "%.1f"), _dn(x.get("PB"), "%.2f"),
+                   _dn(x.get("连续分红年数"), "%.0f"),
+                   _dn(x.get("距MA60%"), "%+.1f%%"),
+                   DIV_ACT_COLOR.get(act, "#8b95a5"), esc(act)))
+        h.append('<div style="font-size:14px;font-weight:700;color:#e0a458;margin-bottom:8px">'
+                 '榜 A · 攒股收息（按股息率排序，共 ' + str(len(divs)) + ' 只，下表列前 '
+                 + str(min(DIV_ROWS_SHOWN, len(divs))) + ' 只）'
+                 '<span style="font-weight:400;color:#8b95a5;font-size:12px">'
+                 '—— 「每万元年分红」＝ 1 万元本金按当前股息率一年能拿到的税前现金</span></div>')
+        h.append('<div style="overflow-x:auto"><table>'
+                 '<tr><th>代码</th><th>名称</th><th>行业</th><th class="num">现价</th>'
+                 '<th class="num">股息率</th><th class="num">东财股息</th>'
+                 '<th class="num">每万元年分红</th><th class="num">PE</th><th class="num">PB</th>'
+                 '<th class="num">连续分红</th><th class="num">距 MA60</th><th>动作</th></tr>'
+                 + "".join(rows) + '</table></div>')
+        h.append('<div class="n" style="margin-top:8px;color:#6b7484">'
+                 '筛选：' + esc(th.get("收息", "")) + '。'
+                 '「股息率」＝ 东财口径与「近 12 个月已实施分红 ÷ 现价」两者中的<b>较低值</b>，'
+                 '这样能挡掉被一次性分红或「已预案未除权」抬高的假高息。</div>')
+
+    # ── 榜 B：值得买的蓝筹 ──
+    if blues:
+        rows = []
+        for x in blues[:DIV_ROWS_SHOWN]:
+            act = x.get("动作") or "—"
+            rows.append(
+                "<tr><td>%s</td><td>%s</td><td style='color:#8b95a5'>%s</td>"
+                "<td class='num' style='color:#c6cedb;font-weight:700'>%s</td>"
+                "<td class='num'>%s</td>"
+                "<td class='num' style='color:#e0a458'>%s</td>"
+                "<td class='num'>%s</td><td class='num'>%s</td><td class='num'>%s</td>"
+                "<td class='num'>%s</td><td class='num'>%s</td>"
+                "<td style='color:%s'>%s</td></tr>"
+                % (esc(x.get("代码", "")), esc(x.get("名称", "")), esc(x.get("行业", "")),
+                   _dn(x.get("综合分"), "%.0f"),
+                   _dn(x.get("总市值亿"), "%.0f"),
+                   _dn(x.get("股息率取低"), "%.2f%%"),
+                   _dn(x.get("ROE估"), "%.1f%%"),
+                   _dn(x.get("PE"), "%.1f"), _dn(x.get("PB"), "%.2f"),
+                   _dn(x.get("连续分红年数"), "%.0f"),
+                   _dn(x.get("距MA60%"), "%+.1f%%"),
+                   DIV_ACT_COLOR.get(act, "#8b95a5"), esc(act)))
+        h.append('<div style="font-size:14px;font-weight:700;color:#c6cedb;margin:16px 0 8px">'
+                 '榜 B · 值得买的蓝筹（按综合分排序，共 ' + str(len(blues)) + ' 只，下表列前 '
+                 + str(min(DIV_ROWS_SHOWN, len(blues))) + ' 只）'
+                 '<span style="font-weight:400;color:#8b95a5;font-size:12px">'
+                 '—— 综合分 ＝ 50×股息率分 ＋ 30×ROE 分 ＋ 20×估值分（各截顶，满分 100）</span></div>')
+        h.append('<div style="overflow-x:auto"><table>'
+                 '<tr><th>代码</th><th>名称</th><th>行业</th><th class="num">综合分</th>'
+                 '<th class="num">总市值(亿)</th><th class="num">股息率</th><th class="num">ROE估</th>'
+                 '<th class="num">PE</th><th class="num">PB</th><th class="num">连续分红</th>'
+                 '<th class="num">距 MA60</th><th>动作</th></tr>'
+                 + "".join(rows) + '</table></div>')
+        h.append('<div class="n" style="margin-top:8px;color:#6b7484">'
+                 '筛选：' + esc(th.get("蓝筹", "")) + '。'
+                 '「位置」＝ 现价相对 MA60（60 日均线）：站上才算右侧；跌破的先等，别接刀。</div>')
+
+    # ── 用法 + 口径 ──
+    h.append('<div class="warning" style="margin-top:14px;border-left:3px solid #f0ad4e;'
+             'background:#1d1a12;padding:11px 14px;border-radius:8px;font-size:12.5px;'
+             'color:#d8c9a8"><b>怎么用：</b>' + esc(r.get("说明", "")) + '</div>')
+    h.append('<div style="margin-top:14px;padding-top:12px;border-top:1px solid #232a36;'
+             'font-size:12px;color:#8b95a5;line-height:1.7">口径：'
+             + '<br>· '.join(esc(x) for x in (r.get("口径") or [])) + '<br>'
+             '数据源：' + esc(r.get("数据源", "")) + '　·　数据日期 ' + d + '<br>'
+             '<b style="color:#d8c9a8">' + esc(r.get("免责", "")) + '</b></div>')
+    h.append('</div></div>')
+    return "".join(h)
+
+
 def render_html(obj):
     daily = obj["daily"]
     emos = emo_series(daily)
@@ -1241,10 +1402,11 @@ def render_html(obj):
 <title>A 股情绪看板 · {esc(d)}</title><style>{CSS}</style></head><body>
 <div class="wrap">
   <h1>A 股情绪看板</h1>
-  <div class="sub">数据日期 <b style="color:#e6e9ef">{esc(d)}</b>　·　数据来源：新浪财经行情（日线快照）＋ 通达信（指数成交额）
+  <div class="sub">数据日期 <b style="color:#e6e9ef">{esc(d)}</b>　·　数据来源：新浪财经行情（日线快照）＋ 通达信（指数成交额）＋ 东财（分红送配 / 估值 / 涨停池）
   　·　情绪值口径见《情绪周期与龙头实战》第 17 册，量价四象限见《什么行情用什么方法》　·　仅供参考，不构成投资建议</div>
 {render_regime()}
 {render_best()}
+{render_dividend()}
   <div class="sec"><div class="card">
     <div class="hero">
       <div>
@@ -1346,6 +1508,7 @@ def main():
         do_swing()
         do_regime()
         do_best()
+        do_dividend()
     do_render()
 
 

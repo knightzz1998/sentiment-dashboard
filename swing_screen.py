@@ -54,49 +54,82 @@ def em_secid(code: str) -> str:
     return ("1." if code[:1] in ("6", "9") else "0.") + code
 
 
+# 东财日线主机（push2his 偶发拒连）。
+# ⚠️ 不要加 push2test.eastmoney.com：它虽然能连上，但返回的日线**有整段缺口**
+#   （实测 605499 只给 60 根，2026-03-13~04-09、05-11~07-03 等区间整段缺失），
+#   会直接把 MA20/MA60 算歪，宁可回落到腾讯。
+EM_KLINE_HOSTS = ("push2his.eastmoney.com", "push2.eastmoney.com")
+
+# 腾讯日线主机 + 路径（web. 前缀偶发 501，另两个域名可用）
+TX_KLINE_ENDPOINTS = (
+    ("web.ifzq.gtimg.cn", "/appstock/app/fqkline/get"),
+    ("ifzq.gtimg.cn", "/appstock/app/fqkline/get"),
+    ("proxy.finance.qq.com", "/ifzqgtimg/appstock/app/fqkline/get"),
+)
+
+
 def fetch_em(code: str, lmt: int = 90):
-    """东财前复权日线（主源）→ [date, open, high, low, close, volume, amount]"""
-    u = ("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=%s"
-         "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58"
-         "&klt=101&fqt=1&end=20500101&lmt=%d" % (em_secid(code), lmt))
-    raw = urllib.request.urlopen(
-        urllib.request.Request(u, headers=UA), timeout=20).read().decode("utf-8", "ignore")
-    d = (json.loads(raw).get("data") or {})
-    kl = d.get("klines") or []
-    bars = []
-    for s in kl:
-        p = s.split(",")
-        if len(p) < 8:
-            continue
+    """东财前复权日线（主源，多主机兜底）→ [date, open, high, low, close, volume, amount]"""
+    err = None
+    for host in EM_KLINE_HOSTS:
         try:
-            bars.append([p[0], float(p[1]), float(p[3]), float(p[4]),
-                         float(p[2]), float(p[5]), float(p[6])])
-        except (ValueError, TypeError):
-            continue
-    return d.get("name") or "", (bars or None)
+            u = ("https://%s/api/qt/stock/kline/get?secid=%s"
+                 "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58"
+                 "&klt=101&fqt=1&end=20500101&lmt=%d" % (host, em_secid(code), lmt))
+            raw = urllib.request.urlopen(
+                urllib.request.Request(u, headers=UA),
+                timeout=20).read().decode("utf-8", "ignore")
+            d = (json.loads(raw).get("data") or {})
+            kl = d.get("klines") or []
+            bars = []
+            for s in kl:
+                p = s.split(",")
+                if len(p) < 8:
+                    continue
+                try:
+                    bars.append([p[0], float(p[1]), float(p[3]), float(p[4]),
+                                 float(p[2]), float(p[5]), float(p[6])])
+                except (ValueError, TypeError):
+                    continue
+            if bars:
+                return d.get("name") or "", bars
+        except Exception as e:
+            err = e
+    if err:
+        raise err
+    return "", None
 
 
 def fetch_tx(code: str, datalen: int = 90):
-    """腾讯前复权日线（兜底；无成交额字段，用 量×100×收 估算）"""
+    """腾讯前复权日线（兜底，多域名兜底；无成交额字段，用 量×100×收 估算）"""
     sym = tx_prefix(code)
-    u = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=%s,day,,,%d,qfq"
-         % (sym, datalen))
-    raw = urllib.request.urlopen(
-        urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0",
-                                           "Referer": "https://gu.qq.com/"}),
-        timeout=20).read().decode("utf-8", "ignore")
-    d = (json.loads(raw).get("data") or {}).get(sym) or {}
-    arr = d.get("qfqday") or d.get("day") or []
-    bars = []
-    for r in arr:
-        if len(r) < 6:
-            continue
+    err = None
+    for host, path in TX_KLINE_ENDPOINTS:
         try:
-            o, c, h, lo, v = float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])
-            bars.append([r[0], o, h, lo, c, v, v * 100 * c])
-        except (ValueError, TypeError):
-            continue
-    return "", (bars or None)
+            u = ("https://%s%s?param=%s,day,,,%d,qfq" % (host, path, sym, datalen))
+            raw = urllib.request.urlopen(
+                urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0",
+                                                   "Referer": "https://gu.qq.com/"}),
+                timeout=20).read().decode("utf-8", "ignore")
+            d = (json.loads(raw).get("data") or {}).get(sym) or {}
+            arr = d.get("qfqday") or d.get("day") or []
+            bars = []
+            for r in arr:
+                if len(r) < 6:
+                    continue
+                try:
+                    o, c, h, lo, v = (float(r[1]), float(r[2]), float(r[3]),
+                                      float(r[4]), float(r[5]))
+                    bars.append([r[0], o, h, lo, c, v, v * 100 * c])
+                except (ValueError, TypeError):
+                    continue
+            if bars:
+                return "", bars
+        except Exception as e:
+            err = e
+    if err:
+        raise err
+    return "", None
 
 
 def fetch_sina(code: str, datalen: int = 90):
@@ -121,15 +154,24 @@ def fetch_sina(code: str, datalen: int = 90):
 
 
 def fetch_one(code: str, datalen: int = 90):
-    """依次尝试 东财 → 腾讯 → 新浪，任一成功即返回 (code, name, bars)"""
+    """依次尝试 东财 → 腾讯 → 新浪，取 **K 线最完整** 的一路。
+
+    不直接用「第一个成功的源」：镜像站点可能返回**跳空/残缺**的日线
+    （实测 push2test 只给 60 根且中间整段缺失），会让均线算歪。
+    因此记录候选里根数最多的一路；够完整（≥ datalen-2）就提前收手，省接口。
+    """
+    best_nm, best_bars = "", None
     for fn in (fetch_em, fetch_tx, fetch_sina):
         try:
             nm, bars = fn(code, datalen)
-            if bars:
-                return code, nm, bars
         except Exception:
             time.sleep(0.15)
-    return code, "", None
+            continue
+        if bars and (best_bars is None or len(bars) > len(best_bars)):
+            best_nm, best_bars = (nm or best_nm), bars
+            if len(bars) >= datalen - 2:
+                break
+    return code, best_nm, best_bars
 
 
 def fetch_names(codes):
