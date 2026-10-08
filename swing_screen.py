@@ -42,16 +42,31 @@ TARGET_DAYS = 20          # 阶段 1 的目标交易日数
 
 
 def tx_prefix(code: str) -> str:
-    if code[:1] in ("6", "9"):
+    """代码 → 腾讯/新浪符号前缀。
+
+    ⚠️ 必须覆盖 ETF/LOF 代码段，否则 ETF 池全部取数失败：
+      · 15xxxx / 16xxxx（深市 ETF/LOF）→ sz     ← 原来落到 bj，全错
+      · 5xxxxx（沪市 ETF/LOF）        → sh     ← 原来落到 bj，全错
+      · 920xxx（北交所新段）          → bj     ← 原来落到 sh，全错
+      剔除货币/债券/商品后剩下的行业主题+宽基 ETF 全在这三段里。
+    """
+    if code[:2] == "92":                 # 北交所 920xxx
+        return "bj" + code
+    if code[:1] in ("6", "9", "5"):      # 沪市：6/9 股票、5 基金
         return "sh" + code
-    if code[:1] in ("0", "3"):
+    if code[:1] in ("0", "3", "1"):      # 深市：0/3 股票、1 基金
         return "sz" + code
-    return "bj" + code
+    return "bj" + code                   # 4xxxxx / 8xxxxx
 
 
 def em_secid(code: str) -> str:
-    """东财 secid：沪市 1.，深市/北交所 0."""
-    return ("1." if code[:1] in ("6", "9") else "0.") + code
+    """东财 secid：沪市 1.，深市/北交所 0.
+
+    沪市含 5xxxxx（ETF/LOF）；北交所 920xxx 也用 0.（同深市）。
+    """
+    if code[:2] == "92":
+        return "0." + code
+    return ("1." if code[:1] in ("6", "9", "5") else "0.") + code
 
 
 # 东财日线主机（push2his 偶发拒连）。
@@ -203,6 +218,8 @@ def main():
         pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--offline", action="store_true")
+    ap.add_argument("--workers", type=int, default=16,
+                    help="并发线程数（默认 16；日线源实测可承受，6 太慢会超时）")
     a = ap.parse_args()
 
     target = ""
@@ -222,10 +239,15 @@ def main():
     need = [] if a.offline else [c for c in codes if c not in data or not data[c]
                                  or (target and data[c][-1][0] < target)]
     if need:
-        print("拉取 %d 只（东财前复权 → 腾讯 → 新浪，三级兜底）…" % len(need))
+        print("拉取 %d 只（东财前复权 → 腾讯 → 新浪，三级兜底；并发 %d）…"
+              % (len(need), a.workers))
         t0 = time.time()
         done, bad = 0, 0
-        with ThreadPoolExecutor(max_workers=6) as ex:
+        # ⚠️ 必须**边拉边存**：整段跑完再写缓存的话，一旦进程被外层 timeout 杀掉
+        #   （build_dashboard.do_swing 上限 1200s），这一轮几十万次请求的成果全丢，
+        #   下次重跑又从零开始 —— 永远收敛不了。故每 200 只落一次盘。
+        persist_every = 200
+        with ThreadPoolExecutor(max_workers=a.workers) as ex:
             for f in as_completed([ex.submit(fetch_one, c) for c in need]):
                 code, nm, bars = f.result()
                 if bars:
@@ -235,7 +257,14 @@ def main():
                 else:
                     bad += 1
                 done += 1
-                if done % 500 == 0:
+                if done % persist_every == 0:
+                    try:
+                        tmp = CACHE.with_suffix(".tmp")
+                        tmp.write_text(json.dumps(data, ensure_ascii=False),
+                                       encoding="utf-8")
+                        tmp.replace(CACHE)
+                    except Exception:
+                        pass
                     print("  %d/%d  成功 %d  失败 %d  %.0fs"
                           % (done, len(need), done - bad, bad, time.time() - t0))
         if data:
