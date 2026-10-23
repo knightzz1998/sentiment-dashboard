@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
 sys.path.insert(0, str(ROOT))
-from swing_screen import fetch_one                      # noqa: E402
+from swing_screen import fetch_one, bar_fresh, mark_final   # noqa: E402
 
 BEST_CACHE = Path(os.environ.get("TEMP", "/tmp")) / "best_kline_cache.json"
 ETF_CODES = DATA / "etf_codes.json"
@@ -80,7 +80,8 @@ def load_bars(codes, offline=False):
         b = data.get(c)
         if not b or len(b) < 90:
             return True
-        return bool(ref) and b[-1][0] < ref          # 缓存落后于最新交易日 → 需要刷新
+        # 缓存落后于最新交易日、或当日 bar 仍可能是盘中快照 → 需要刷新
+        return not bar_fresh(b[-1][0], ref, kind="best")
 
     need = [c for c in codes if stale(c)]
     if offline or not need:
@@ -106,6 +107,8 @@ def load_bars(codes, offline=False):
     else:
         print("  ⚠️ 全部拉取失败，保留旧缓存")
     print("  完成 %d 只（%.0fs）" % (got, time.time() - t0))
+    if got and mark_final(ref, kind="best"):
+        print("  已标记 %s 为「收盘定稿」" % ref)
     return data
 
 

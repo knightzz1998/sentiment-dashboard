@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
 sys.path.insert(0, str(ROOT))
-from swing_screen import fetch_one, fetch_names          # noqa: E402
+from swing_screen import fetch_one, fetch_names, bar_fresh, mark_final  # noqa: E402
 
 OUT = DATA / "dividend.json"
 REGIME = DATA / "regime.json"
@@ -222,7 +222,7 @@ def load_klines(codes, ref_date, offline=False):
         b = data.get(c)
         if not b or len(b) < 60:
             return True
-        return bool(ref_date) and b[-1][0] < ref_date
+        return not bar_fresh(b[-1][0], ref_date, kind="div")
 
     need = [c for c in codes if stale(c)]
     if offline or not need:
@@ -244,6 +244,8 @@ def load_klines(codes, ref_date, offline=False):
     else:
         print("  ⚠️ 日线全部拉取失败，保留旧缓存")
     print("  日线完成 %d 只（%.0fs）" % (got, time.time() - t0))
+    if got and mark_final(ref_date, kind="div"):
+        print("  已标记 %s 为「收盘定稿」" % ref_date)
     return data
 
 

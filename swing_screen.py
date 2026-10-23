@@ -40,6 +40,54 @@ NAMES = {}
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
 TARGET_DAYS = 20          # 阶段 1 的目标交易日数
 
+# ⚠️ 收盘定稿标记：盘中的日线接口会把「当日」bar 写成盘中快照价。
+#   若仅在「缓存最后一根 bar 日期 == 最新交易日」就判定为已刷新，
+#   则 13:00 跑过一次后，15:15 收盘后再跑会**全部跳过抓取**，
+#   拿 13:00 的盘中价当收盘价算出整份候选名单（2026-10-23 踩过：
+#   70% 个股、2823 只深市全部偏差 −1%~−6%，最优策略信号虚增到 613 只）。
+#   对策：只有当日在 15:05 之后成功抓取过，才把该日记为「已定稿」。
+FINAL_MARK = Path(os.environ.get("TEMP", "/tmp")) / "kline_final_mark.json"
+
+
+def _final_path(kind="swing"):
+    """每个缓存各自一份定稿标记 —— 否则波段先跑完写了标记，
+    后面的最优/收息模块会误以为自己当日的数据也已定稿而跳过抓取。"""
+    return FINAL_MARK.with_name("kline_final_%s.json" % kind)
+
+
+def load_final(kind="swing"):
+    """已定稿（收盘后抓过）的最新交易日。"""
+    try:
+        return json.loads(_final_path(kind).read_text(encoding="utf-8")).get("final", "")
+    except Exception:
+        return ""
+
+
+def mark_final(ref, kind="swing"):
+    """本次若在 15:05 之后运行，则把 ref 记为已定稿。"""
+    try:
+        now = datetime.now()
+        if now.strftime("%Y-%m-%d") == ref and (now.hour, now.minute) >= (15, 5):
+            _final_path(kind).write_text(
+                json.dumps({"final": ref, "at": now.strftime("%Y-%m-%d %H:%M")}),
+                encoding="utf-8")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def bar_fresh(last_date, ref, final=None, kind="swing"):
+    """缓存最后一根 bar 是否可作为 ref 当日的**收盘**数据使用。"""
+    if not ref or not last_date or last_date < ref:
+        return False
+    if last_date == ref:
+        if final is None:
+            final = load_final(kind)
+        if (final or "") < ref:
+            return False          # 当日尚未定稿 → 这根 bar 可能是盘中快照
+    return True
+
 
 def tx_prefix(code: str) -> str:
     """代码 → 腾讯/新浪符号前缀。
@@ -161,8 +209,11 @@ def fetch_sina(code: str, datalen: int = 90):
     for r in arr:
         try:
             o, h, lo, c = float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"])
+            # ⚠️ 新浪 CN_MarketData 的 volume 单位是**股**（东财/腾讯是**手**）。
+            #    原来按「手」乘 100 → 成交额被放大 100 倍，20 日均额门槛（≥5000 万）形同虚设，
+            #    候选里混进大量日均额不足千万的票（2026-10-23 踩过：苏州龙杰 0.63 亿 被算成 63.11 亿）。
             v = float(r.get("volume") or 0)
-            bars.append([r["day"], o, h, lo, c, v, v * 100 * c])
+            bars.append([r["day"], o, h, lo, c, v / 100.0, v * c])
         except (KeyError, ValueError, TypeError):
             continue
     return "", (bars or None)
@@ -237,7 +288,7 @@ def main():
             data = {}
 
     need = [] if a.offline else [c for c in codes if c not in data or not data[c]
-                                 or (target and data[c][-1][0] < target)]
+                                 or not bar_fresh(data[c][-1][0], target)]
     if need:
         print("拉取 %d 只（东财前复权 → 腾讯 → 新浪，三级兜底；并发 %d）…"
               % (len(need), a.workers))
@@ -275,6 +326,8 @@ def main():
         else:
             print("  全部失败，**不覆盖缓存**（避免把好缓存写成空文件）")
         print("  完成 %d 只（失败 %d，%.0fs）" % (len(data), bad, time.time() - t0))
+        if mark_final(target):
+            print("  已标记 %s 为「收盘定稿」（此后当日 bar 不再重拉）" % target)
     else:
         print("缓存已是最新（%d 只）" % len(data))
 
